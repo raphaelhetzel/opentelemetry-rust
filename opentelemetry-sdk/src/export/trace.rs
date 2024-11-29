@@ -68,6 +68,14 @@ pub trait SpanExporter: Send + Sync + Debug {
     fn set_resource(&mut self, _resource: &Resource) {}
 }
 
+pub trait MultiServiceSpanExporter: SpanExporter {
+    fn export_with_resource(
+        &mut self,
+        batch: Vec<SpanData>,
+        res: &crate::resource::Resource,
+    ) -> BoxFuture<'static, ExportResult>;
+}
+
 /// `SpanData` contains all the information collected by a `Span` and can be used
 /// by exporters as a standard input.
 #[derive(Clone, Debug, PartialEq)]

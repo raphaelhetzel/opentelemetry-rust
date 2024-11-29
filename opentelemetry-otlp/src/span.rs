@@ -106,7 +106,7 @@ impl HasHttpConfig for SpanExporterBuilder<HttpExporterBuilderSet> {
 
 /// OTLP exporter that sends tracing information
 #[derive(Debug)]
-pub struct SpanExporter(Box<dyn opentelemetry_sdk::export::trace::SpanExporter>);
+pub struct SpanExporter(Box<dyn opentelemetry_sdk::export::trace::MultiServiceSpanExporter>);
 
 impl SpanExporter {
     /// Obtain a builder to configure a [SpanExporter].
@@ -115,7 +115,9 @@ impl SpanExporter {
     }
 
     /// Build a new span exporter from a client
-    pub fn new(client: impl opentelemetry_sdk::export::trace::SpanExporter + 'static) -> Self {
+    pub fn new(
+        client: impl opentelemetry_sdk::export::trace::MultiServiceSpanExporter + 'static,
+    ) -> Self {
         SpanExporter(Box::new(client))
     }
 }
@@ -127,5 +129,15 @@ impl opentelemetry_sdk::export::trace::SpanExporter for SpanExporter {
 
     fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
         self.0.set_resource(resource);
+    }
+}
+
+impl opentelemetry_sdk::export::trace::MultiServiceSpanExporter for SpanExporter {
+    fn export_with_resource(
+        &mut self,
+        batch: Vec<SpanData>,
+        res: &opentelemetry_sdk::resource::Resource,
+    ) -> BoxFuture<'static, ExportResult> {
+        self.0.export_with_resource(batch, res)
     }
 }

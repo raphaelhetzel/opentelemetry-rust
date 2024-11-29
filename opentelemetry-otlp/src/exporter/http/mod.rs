@@ -6,7 +6,10 @@ use crate::{
     ExportConfig, Protocol, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS,
     OTEL_EXPORTER_OTLP_TIMEOUT,
 };
+use futures_core::future::BoxFuture;
+use http::{header::CONTENT_TYPE, Method};
 use http::{HeaderName, HeaderValue, Uri};
+use opentelemetry::trace::TraceError;
 use opentelemetry_http::HttpClient;
 use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
 #[cfg(feature = "logs")]
@@ -15,6 +18,7 @@ use opentelemetry_proto::transform::logs::tonic::group_logs_by_resource_and_scop
 use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_scope;
 #[cfg(feature = "logs")]
 use opentelemetry_sdk::export::logs::LogBatch;
+use opentelemetry_sdk::export::trace::ExportResult;
 #[cfg(feature = "trace")]
 use opentelemetry_sdk::export::trace::SpanData;
 use prost::Message;
@@ -293,12 +297,73 @@ impl OtlpHttpClient {
     }
 
     #[cfg(feature = "trace")]
+    fn export_inner(
+        &self,
+        batch: Vec<SpanData>,
+        resource: &ResourceAttributesWithSchema,
+    ) -> BoxFuture<'static, ExportResult> {
+        let client = match self
+            .client
+            .lock()
+            .map_err(|e| TraceError::Other(e.to_string().into()))
+            .and_then(|g| match &*g {
+                Some(client) => Ok(Arc::clone(client)),
+                _ => Err(TraceError::Other("exporter is already shut down".into())),
+            }) {
+            Ok(client) => client,
+            Err(err) => return Box::pin(std::future::ready(Err(err))),
+        };
+
+        let (body, content_type) = match self.build_trace_export_body(batch, resource) {
+            Ok(body) => body,
+            Err(e) => return Box::pin(std::future::ready(Err(e))),
+        };
+
+        let mut request = match http::Request::builder()
+            .method(Method::POST)
+            .uri(&self.collector_endpoint)
+            .header(CONTENT_TYPE, content_type)
+            .body(body)
+        {
+            Ok(req) => req,
+            Err(e) => {
+                return Box::pin(std::future::ready(Err(crate::Error::RequestFailed(
+                    Box::new(e),
+                )
+                .into())))
+            }
+        };
+
+        for (k, v) in &self.headers {
+            request.headers_mut().insert(k.clone(), v.clone());
+        }
+
+        Box::pin(async move {
+            let request_uri = request.uri().to_string();
+            let response = client.send(request).await?;
+
+            if !response.status().is_success() {
+                let error = format!(
+                    "OpenTelemetry trace export failed. Url: {}, Status Code: {}, Response: {:?}",
+                    response.status().as_u16(),
+                    request_uri,
+                    response.body()
+                );
+                return Err(TraceError::Other(error.into()));
+            }
+
+            Ok(())
+        })
+    }
+
+    #[cfg(feature = "trace")]
     fn build_trace_export_body(
         &self,
         spans: Vec<SpanData>,
+        resource: &ResourceAttributesWithSchema,
     ) -> opentelemetry::trace::TraceResult<(Vec<u8>, &'static str)> {
         use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-        let resource_spans = group_spans_by_resource_and_scope(spans, &self.resource);
+        let resource_spans = group_spans_by_resource_and_scope(spans, resource);
 
         let req = ExportTraceServiceRequest { resource_spans };
         match self.protocol {

@@ -166,6 +166,91 @@ impl SpanProcessor for SimpleSpanProcessor {
     }
 }
 
+#[derive(Debug)]
+pub struct MultiServiceSpanProcessor {
+    exporter: Mutex<Box<dyn crate::export::trace::MultiServiceSpanExporter>>,
+}
+
+impl MultiServiceSpanProcessor {
+    pub fn new(exporter: Box<dyn crate::export::trace::MultiServiceSpanExporter>) -> Self {
+        Self {
+            exporter: Mutex::new(exporter),
+        }
+    }
+}
+
+impl SpanProcessor for MultiServiceSpanProcessor {
+    fn on_start(&self, _span: &mut Span, _cx: &Context) {
+        // Ignored
+    }
+
+    fn on_end(&self, span: SpanData) {
+        let mut span = span;
+        let mut new_attrs: Vec<opentelemetry::KeyValue> = Vec::new();
+        let mut res_attrs: Vec<opentelemetry::KeyValue> = Vec::new();
+        for attribute in span.attributes {
+            if attribute.key.as_str().starts_with("resource.") {
+                res_attrs.push(opentelemetry::KeyValue::new(
+                    attribute
+                        .key
+                        .to_string()
+                        .strip_prefix("resource.")
+                        .unwrap()
+                        .to_string(),
+                    attribute.value,
+                ));
+            } else {
+                new_attrs.push(opentelemetry::KeyValue::new(attribute.key, attribute.value));
+            }
+        }
+        span.attributes = new_attrs;
+
+        if !span.span_context.is_sampled() {
+            return;
+        }
+
+        let result = self
+            .exporter
+            .lock()
+            .map_err(|_| TraceError::Other("SimpleSpanProcessor mutex poison".into()))
+            .and_then(|mut exporter| {
+                futures_executor::block_on(
+                    exporter.export_with_resource(vec![span], &crate::Resource::new(res_attrs)),
+                )
+            });
+
+        if let Err(err) = result {
+            // TODO: check error type, and log `error` only if the error is user-actiobable, else log `debug`
+            otel_debug!(
+                name: "SimpleProcessor.OnEnd.Error",
+                reason = format!("{:?}", err)
+            );
+        }
+    }
+
+    fn force_flush(&self) -> TraceResult<()> {
+        if let Ok(mut exporter) = self.exporter.lock() {
+            exporter.shutdown();
+            Ok(())
+        } else {
+            Err(TraceError::Other(
+                "SimpleSpanProcessor mutex poison at shutdown".into(),
+            ))
+        }
+    }
+
+    fn shutdown(&self) -> TraceResult<()> {
+        if let Ok(mut exporter) = self.exporter.lock() {
+            exporter.shutdown();
+            Ok(())
+        } else {
+            Err(TraceError::Other(
+                "SimpleSpanProcessor mutex poison at shutdown".into(),
+            ))
+        }
+    }
+}
+
 /// A [`SpanProcessor`] that asynchronously buffers finished spans and reports
 /// them at a preconfigured interval.
 ///

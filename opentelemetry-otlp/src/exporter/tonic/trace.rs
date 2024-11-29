@@ -51,10 +51,11 @@ impl TonicTracesClient {
             resource: Default::default(),
         }
     }
-}
 
-impl SpanExporter for TonicTracesClient {
-    fn export(&mut self, batch: Vec<SpanData>) -> BoxFuture<'static, ExportResult> {
+    fn export_inner(
+        &mut self,
+        resource_spans: Vec<opentelemetry_proto::tonic::trace::v1::ResourceSpans>,
+    ) -> BoxFuture<'static, ExportResult> {
         let (mut client, metadata, extensions) = match &mut self.inner {
             Some(inner) => {
                 let (m, e, _) = match inner.interceptor.call(Request::new(())) {
@@ -72,8 +73,6 @@ impl SpanExporter for TonicTracesClient {
             }
         };
 
-        let resource_spans = group_spans_by_resource_and_scope(batch, &self.resource);
-
         Box::pin(async move {
             client
                 .export(Request::from_parts(
@@ -87,6 +86,13 @@ impl SpanExporter for TonicTracesClient {
             Ok(())
         })
     }
+}
+
+impl SpanExporter for TonicTracesClient {
+    fn export(&mut self, batch: Vec<SpanData>) -> BoxFuture<'static, ExportResult> {
+        let resource_spans = group_spans_by_resource_and_scope(batch, &self.resource);
+        self.export_inner(resource_spans)
+    }
 
     fn shutdown(&mut self) {
         let _ = self.inner.take();
@@ -94,5 +100,16 @@ impl SpanExporter for TonicTracesClient {
 
     fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
         self.resource = resource.into();
+    }
+}
+
+impl opentelemetry_sdk::export::trace::MultiServiceSpanExporter for TonicTracesClient {
+    fn export_with_resource(
+        &mut self,
+        batch: Vec<SpanData>,
+        res: &opentelemetry_sdk::Resource,
+    ) -> BoxFuture<'static, ExportResult> {
+        let resource_spans = group_spans_by_resource_and_scope(batch, &res.into());
+        self.export_inner(resource_spans)
     }
 }
